@@ -11,7 +11,7 @@ export default {
       strict: true,
     }),
     paths: {
-      base: "/admin",
+      base: "",
       relative: false,
     },
     prerender: {
