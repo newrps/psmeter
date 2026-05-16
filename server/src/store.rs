@@ -222,75 +222,70 @@ impl SqliteStore {
         })
     }
 
-    // 사전집계 테이블 기반 stats. events_table = "events_hourly"|"events_daily",
-    // visitors_table = "visitors_hourly"|"visitors_daily", ts_col = "ts_hour"|"ts_day".
-    fn stats_agg(
+    // 사전집계 테이블 + raw 보충으로 stats 계산.
+    // cutoff = 마지막 롤업 ts_ms. 그보다 앞은 agg에서, 그보다 뒤는 raw에서 가져와 합산.
+    // 이렇게 해야 오늘/지금 시각 데이터가 락업 시점에 누락되지 않는다.
+    fn stats_combined(
         &self,
         conn: &rusqlite::Connection,
         site: &str,
         from_ms: i64,
         to_ms: i64,
+        cutoff_ms: i64,
         events_table: &str,
         visitors_table: &str,
         ts_col: &str,
         source: &str,
     ) -> rusqlite::Result<Stats> {
+        // agg 범위: [from, min(to, cutoff))   (cutoff는 다음 버킷 시작 = 미rollup 경계)
+        // raw 범위: [max(from, cutoff), to]
+        let agg_to = cutoff_ms.min(to_ms);
+        let raw_from = cutoff_ms.max(from_ms);
+        // BETWEEN은 닫힌 구간. agg는 (cutoff 미만)만 봐야 하므로 agg_to - 1 사용.
+        let agg_to_inc = agg_to - 1;
+
         let pageviews: i64 = conn.query_row(
             &format!(
-                "SELECT COALESCE(SUM(pageviews),0) FROM {events_table}
-                 WHERE site = ?1 AND {ts_col} BETWEEN ?2 AND ?3"
+                "SELECT
+                   COALESCE((SELECT SUM(pageviews) FROM {events_table}
+                             WHERE site=?1 AND {ts_col} BETWEEN ?2 AND ?3), 0)
+                 + COALESCE((SELECT COUNT(*) FROM events
+                             WHERE site=?1 AND kind='pageview'
+                             AND ts_ms BETWEEN ?4 AND ?5), 0)"
             ),
-            params![site, from_ms, to_ms],
+            params![site, from_ms, agg_to_inc, raw_from, to_ms],
             |r| r.get(0),
         )?;
 
         let visitors: i64 = conn.query_row(
             &format!(
-                "SELECT COUNT(DISTINCT visitor_hash) FROM {visitors_table}
-                 WHERE site = ?1 AND {ts_col} BETWEEN ?2 AND ?3"
+                "SELECT COUNT(DISTINCT visitor_hash) FROM (
+                    SELECT visitor_hash FROM {visitors_table}
+                    WHERE site=?1 AND {ts_col} BETWEEN ?2 AND ?3
+                    UNION ALL
+                    SELECT visitor_hash FROM events
+                    WHERE site=?1 AND ts_ms BETWEEN ?4 AND ?5
+                 )"
             ),
-            params![site, from_ms, to_ms],
+            params![site, from_ms, agg_to_inc, raw_from, to_ms],
             |r| r.get(0),
         )?;
 
-        let top_pages = top_n_agg(
-            conn,
-            &format!(
-                "SELECT path, SUM(pageviews) c FROM {events_table}
-                 WHERE site = ?1 AND {ts_col} BETWEEN ?2 AND ?3
-                 GROUP BY path ORDER BY c DESC LIMIT 10"
-            ),
-            site, from_ms, to_ms,
+        let top_pages = top_n_combined(
+            conn, events_table, ts_col, "path", "kind='pageview'",
+            site, from_ms, agg_to_inc, raw_from, to_ms,
         )?;
-
-        let top_referrers = top_n_agg(
-            conn,
-            &format!(
-                "SELECT referrer, SUM(pageviews) c FROM {events_table}
-                 WHERE site = ?1 AND {ts_col} BETWEEN ?2 AND ?3
-                 GROUP BY referrer ORDER BY c DESC LIMIT 10"
-            ),
-            site, from_ms, to_ms,
+        let top_referrers = top_n_combined(
+            conn, events_table, ts_col, "referrer", "kind='pageview'",
+            site, from_ms, agg_to_inc, raw_from, to_ms,
         )?;
-
-        let countries = top_n_agg(
-            conn,
-            &format!(
-                "SELECT country, SUM(pageviews) c FROM {events_table}
-                 WHERE site = ?1 AND {ts_col} BETWEEN ?2 AND ?3
-                 GROUP BY country ORDER BY c DESC LIMIT 10"
-            ),
-            site, from_ms, to_ms,
+        let countries = top_n_combined(
+            conn, events_table, ts_col, "country", "kind='pageview'",
+            site, from_ms, agg_to_inc, raw_from, to_ms,
         )?;
-
-        let devices = top_n_agg(
-            conn,
-            &format!(
-                "SELECT device, SUM(pageviews) c FROM {events_table}
-                 WHERE site = ?1 AND {ts_col} BETWEEN ?2 AND ?3
-                 GROUP BY device ORDER BY c DESC LIMIT 10"
-            ),
-            site, from_ms, to_ms,
+        let devices = top_n_combined(
+            conn, events_table, ts_col, "device", "kind='pageview'",
+            site, from_ms, agg_to_inc, raw_from, to_ms,
         )?;
 
         Ok(Stats {
@@ -302,6 +297,15 @@ impl SqliteStore {
             devices,
             source: source.to_string(),
         })
+    }
+
+    fn last_rollup_ts(&self, conn: &rusqlite::Connection, name: &str) -> i64 {
+        conn.query_row(
+            "SELECT last_ts_ms FROM rollup_state WHERE name = ?1",
+            params![name],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
     }
 }
 
@@ -374,11 +378,15 @@ impl Store for SqliteStore {
         let conn = self.conn()?;
         let range = to_ms - from_ms;
         if range > 7 * DAY_MS {
+            let cutoff = self.last_rollup_ts(&conn, "daily");
             let from_d = floor_to_bucket(from_ms, DAY_MS);
-            self.stats_agg(&conn, site, from_d, to_ms, "events_daily", "visitors_daily", "ts_day", "daily")
+            self.stats_combined(&conn, site, from_d, to_ms, cutoff,
+                "events_daily", "visitors_daily", "ts_day", "daily")
         } else if range > DAY_MS {
+            let cutoff = self.last_rollup_ts(&conn, "hourly");
             let from_h = floor_to_bucket(from_ms, HOUR_MS);
-            self.stats_agg(&conn, site, from_h, to_ms, "events_hourly", "visitors_hourly", "ts_hour", "hourly")
+            self.stats_combined(&conn, site, from_h, to_ms, cutoff,
+                "events_hourly", "visitors_hourly", "ts_hour", "hourly")
         } else {
             self.stats_raw(&conn, site, from_ms, to_ms)
         }
@@ -540,16 +548,44 @@ fn top_n(
     Ok(rows)
 }
 
-fn top_n_agg(
+// 사전집계 + raw 보충 union 결과를 dimension별로 합산한 top10.
+// raw 쪽은 NULL을 '(direct)'/'(unknown)'로 정규화 (집계 테이블과 일치시키기 위해).
+fn top_n_combined(
     conn: &rusqlite::Connection,
-    sql: &str,
+    events_table: &str,
+    ts_col: &str,
+    dim: &str,           // "path" | "referrer" | "country" | "device"
+    where_extra: &str,   // "kind='pageview'" (raw 쪽 필터만 적용)
     site: &str,
-    from: i64,
-    to: i64,
+    agg_from: i64,
+    agg_to_inc: i64,
+    raw_from: i64,
+    raw_to: i64,
 ) -> rusqlite::Result<Vec<(String, i64)>> {
-    let mut stmt = conn.prepare(sql)?;
+    let raw_expr = match dim {
+        "referrer" => "COALESCE(referrer,'(direct)')".to_string(),
+        "country"  => "COALESCE(country,'(unknown)')".to_string(),
+        "device"   => "COALESCE(device,'(unknown)')".to_string(),
+        other      => other.to_string(),
+    };
+    let sql = format!(
+        "SELECT k, SUM(c) AS total FROM (
+            SELECT {dim} AS k, pageviews AS c FROM {events_table}
+            WHERE site = ?1 AND {ts_col} BETWEEN ?2 AND ?3
+            UNION ALL
+            SELECT {raw_expr} AS k, COUNT(*) AS c FROM events
+            WHERE site = ?1 AND {where_extra}
+                  AND ts_ms BETWEEN ?4 AND ?5
+            GROUP BY {raw_expr}
+         )
+         GROUP BY k ORDER BY total DESC LIMIT 10"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map(params![site, from, to], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map(
+            params![site, agg_from, agg_to_inc, raw_from, raw_to],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
