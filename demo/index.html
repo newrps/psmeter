@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Psmeter 데모</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      max-width: 600px;
+      margin: 40px auto;
+      padding: 0 20px;
+      background: #0f172a;
+      color: #f8fafc;
+      line-height: 1.5;
+    }
+    h1 { background: linear-gradient(135deg, #38bdf8, #818cf8); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+    code { background: #1e293b; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+    pre { background: #1e293b; padding: 12px; border-radius: 8px; overflow-x: auto; font-size: 13px; }
+    button { background: #38bdf8; color: #0f172a; border: 0; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; }
+    button:hover { background: #7dd3fc; }
+    .hint { color: #94a3b8; font-size: 13px; }
+    nav { margin: 20px 0; }
+    nav a { color: #38bdf8; margin-right: 12px; }
+  </style>
+
+  <!-- 트래커 한 줄 (운영시엔 data-site 명시) -->
+  <script src="http://localhost:3100/tracker/psmeter.js"
+          data-server="http://localhost:3100"
+          data-site="demo.local"></script>
+</head>
+<body>
+  <h1>📊 Psmeter 데모</h1>
+  <p class="hint">이 페이지는 psmeter 서버로 자동 pageview 이벤트를 전송합니다.</p>
+
+  <nav>
+    <a href="/" onclick="history.pushState({},'','/'); return false">홈</a>
+    <a href="/about" onclick="history.pushState({},'/about','/about'); return false">소개</a>
+    <a href="/pricing" onclick="history.pushState({},'/pricing','/pricing'); return false">요금</a>
+    <a href="/contact" onclick="history.pushState({},'/contact','/contact'); return false">연락처</a>
+  </nav>
+
+  <p>네비게이션 누를 때마다 pushState 가 발생해서 새 pageview 이벤트가 전송됨 (SPA 라우팅 자동 감지).</p>
+
+  <h3>커스텀 이벤트</h3>
+  <p>JS API: <code>window.psmeter('event_name')</code></p>
+  <button onclick="psmeter('signup_click')">"signup_click" 이벤트 보내기</button>
+  <button onclick="psmeter('purchase')">"purchase" 이벤트 보내기</button>
+
+  <h3>설치 코드</h3>
+  <pre>&lt;script src="https://your-psmeter.com/tracker/psmeter.js"
+        data-server="https://your-psmeter.com"
+        data-site="example.com"&gt;&lt;/script&gt;</pre>
+
+  <p class="hint">F12 → Network 탭에서 <code>/api/track</code> 요청 확인 가능.</p>
+</body>
+</html>

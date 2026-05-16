@@ -1,0 +1,32 @@
+# Rust
+server/target/
+server/target-linux/
+**/*.rs.bk
+
+# Node / SvelteKit
+**/node_modules/
+**/.svelte-kit/
+dashboard-sveltekit/build/
+
+# Runtime data
+data/
+dist/data/
+
+# Built binaries
+dist/*.exe
+dist/psmeter-server-linux
+
+# Secrets
+.env
+.env.local
+*.key
+*.pem
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
