@@ -466,6 +466,28 @@ async fn main() {
         data_dir: data_dir.clone(),
     });
 
+    // 백그라운드 롤업: 5분 간격. 이미 완료된 시간/일이면 자동 스킵.
+    // 첫 실행 시 백필이 큰 DB라면 시간이 걸리지만 1회성.
+    {
+        let rollup_state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(5 * 60));
+            loop {
+                tick.tick().await;
+                match rollup_state.store.rollup_hourly().await {
+                    Ok(n) if n > 0 => tracing::info!("hourly rollup: {n} new visitor rows"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("hourly rollup failed: {e}"),
+                }
+                match rollup_state.store.rollup_daily().await {
+                    Ok(n) if n > 0 => tracing::info!("daily rollup: {n} new visitor rows"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("daily rollup failed: {e}"),
+                }
+            }
+        });
+    }
+
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/track", post(track))
@@ -489,26 +511,6 @@ async fn main() {
         .parse()
         .expect("invalid PSMETER_BIND");
     let addr = SocketAddr::new(bind, port);
-
-    // 백그라운드 롤업: 5분 간격. 아직 완료되지 않은 시간/일은 자동 스킵.
-    // 첫 실행 시 백필이 큰 DB라면 시간이 걸릴 수 있지만 1회성.
-    let rollup_state = state.clone();
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(5 * 60));
-        loop {
-            tick.tick().await;
-            match rollup_state.store.rollup_hourly().await {
-                Ok(n) if n > 0 => tracing::info!("hourly rollup: {n} new visitor rows"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!("hourly rollup failed: {e}"),
-            }
-            match rollup_state.store.rollup_daily().await {
-                Ok(n) if n > 0 => tracing::info!("daily rollup: {n} new visitor rows"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!("daily rollup failed: {e}"),
-            }
-        }
-    });
 
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
     tracing::info!("psmeter listening on http://{}", addr);
