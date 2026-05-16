@@ -21,7 +21,7 @@ $root = $PSScriptRoot
 $SSHHost    = if ($env:PSMETER_SSH_HOST) { $env:PSMETER_SSH_HOST } else { "psmeter" }
 $RemotePath = "/opt/psmeter/psmeter-server-linux"
 $Binary     = "$root\server\target-linux\release\psmeter-server"
-$HealthUrl  = if ($env:PSMETER_HEALTH_URL) { $env:PSMETER_HEALTH_URL } else { "https://psmeter.zam.kr/api/health" }
+$HealthUrl  = if ($env:PSMETER_HEALTH_URL) { $env:PSMETER_HEALTH_URL } else { "https://meter.zam.kr/api/health" }
 
 function Step($msg) { Write-Host ""; Write-Host "==> $msg" -ForegroundColor Cyan }
 function Skip($msg) { Write-Host "    [skip] $msg" -ForegroundColor DarkGray }

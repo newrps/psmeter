@@ -24,17 +24,18 @@
       path: path(),
       referrer: document.referrer || null
     });
+    // text/plain 사용: CORS-safelisted라 preflight(OPTIONS) 회피
+    // → sendBeacon이 페이지 unload 직전이어도 그대로 전송됨
     try {
-      // sendBeacon: fire-and-forget, 페이지 이동/종료 시에도 보장
       if (navigator.sendBeacon) {
-        navigator.sendBeacon(TRACK_URL, new Blob([body], { type: "application/json" }));
+        navigator.sendBeacon(TRACK_URL, new Blob([body], { type: "text/plain" }));
         return;
       }
     } catch (_) {}
     // fallback
     fetch(TRACK_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "text/plain" },
       body: body,
       keepalive: true
     }).catch(function () {});

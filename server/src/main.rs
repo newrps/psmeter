@@ -1,6 +1,7 @@
 mod store;
 
 use axum::{
+    body::Bytes,
     extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Path as AxPath, Query, State},
     http::{header, HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Json, Response},
@@ -144,8 +145,12 @@ async fn track(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
-    Json(body): Json<TrackBody>,
+    raw: Bytes,
 ) -> Result<StatusCode, ApiError> {
+    // sendBeacon은 text/plain 으로 보낸다 (CORS preflight 회피).
+    // Content-Type 가리지 말고 본문만 JSON 파싱한다.
+    let body: TrackBody = serde_json::from_slice(&raw)
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("invalid body: {e}")))?;
     // 사이트 자동 생성 (없으면) — self-hosted 편의성
     state
         .store
