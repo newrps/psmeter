@@ -18,7 +18,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use store::{Event, SqliteStore, Store};
+use store::{DiskInfo, Event, SqliteStore, Store};
 use tower_http::cors::CorsLayer;
 
 #[derive(RustEmbed)]
@@ -309,6 +309,184 @@ async fn live(
     Ok(Json(LiveResp { active }))
 }
 
+// ---- Admin: events (원본 조회) ----
+
+#[derive(Debug, Deserialize)]
+struct EventsQuery {
+    site: String,
+    #[serde(default)]
+    from: Option<i64>,
+    #[serde(default)]
+    to: Option<i64>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct EventsResp {
+    events: Vec<Event>,
+    total: i64,
+    has_more: bool,
+}
+
+async fn list_events(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<EventsQuery>,
+) -> Result<Json<EventsResp>, ApiError> {
+    require_admin(&state, &headers).await?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let from = q.from.unwrap_or(now - 24 * 3600 * 1000);
+    let to = q.to.unwrap_or(now);
+    let limit = q.limit.unwrap_or(100).clamp(1, 1000);
+    let offset = q.offset.unwrap_or(0).max(0);
+    let kind_filter = q.kind.as_deref().filter(|s| !s.is_empty() && *s != "all");
+
+    let events = state.store.list_events(&q.site, from, to, kind_filter, limit, offset).await?;
+    let total = state.store.count_events(&q.site, from, to, kind_filter).await?;
+    let has_more = offset + (events.len() as i64) < total;
+    Ok(Json(EventsResp { events, total, has_more }))
+}
+
+async fn events_csv(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<EventsQuery>,
+) -> Result<Response, ApiError> {
+    require_admin(&state, &headers).await?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let from = q.from.unwrap_or(now - 24 * 3600 * 1000);
+    let to = q.to.unwrap_or(now);
+    let kind_filter = q.kind.as_deref().filter(|s| !s.is_empty() && *s != "all");
+    // 안전 한도 10만건 (대용량 export는 잘라서 받도록 유도)
+    let events = state.store.list_events(&q.site, from, to, kind_filter, 100_000, 0).await?;
+
+    let mut csv = String::with_capacity(events.len() * 128);
+    csv.push_str("ts_iso,ts_ms,site,kind,path,referrer,country,device,browser,visitor_hash\n");
+    for e in events {
+        let ts_iso = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(e.ts_ms)
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_default();
+        csv.push_str(&format!(
+            "{},{},{},{},{},{},{},{},{},{}\n",
+            ts_iso,
+            e.ts_ms,
+            csv_escape(&e.site),
+            csv_escape(&e.kind),
+            csv_escape(&e.path),
+            csv_escape(e.referrer.as_deref().unwrap_or("")),
+            csv_escape(e.country.as_deref().unwrap_or("")),
+            csv_escape(e.device.as_deref().unwrap_or("")),
+            csv_escape(e.browser.as_deref().unwrap_or("")),
+            e.visitor_hash,
+        ));
+    }
+
+    let fname = format!("events-{}-{}.csv", q.site, to);
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{fname}\""),
+        )
+        .body(csv.into())
+        .unwrap())
+}
+
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+// ---- Admin: disk info ----
+
+async fn disk(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<DiskInfo>, ApiError> {
+    require_admin(&state, &headers).await?;
+    let db_bytes = state.store.db_size_bytes().await?;
+    let (total, free) = disk_space(&state.data_dir);
+    Ok(Json(DiskInfo {
+        db_bytes,
+        disk_total_bytes: total,
+        disk_free_bytes: free,
+    }))
+}
+
+// Linux 한정: statvfs로 free/total 계산. 그 외 OS는 (0, 0).
+#[cfg(target_os = "linux")]
+fn disk_space(path: &std::path::Path) -> (i64, i64) {
+    use std::ffi::CString;
+    use std::os::raw::c_char;
+
+    extern "C" {
+        fn statvfs(path: *const c_char, buf: *mut StatVfs) -> i32;
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct StatVfs {
+        f_bsize: u64,
+        f_frsize: u64,
+        f_blocks: u64,
+        f_bfree: u64,
+        f_bavail: u64,
+        f_files: u64,
+        f_ffree: u64,
+        f_favail: u64,
+        f_fsid: u64,
+        f_flag: u64,
+        f_namemax: u64,
+        _spare: [u32; 6],
+    }
+
+    let path_str = path.to_string_lossy();
+    let c_path = match CString::new(path_str.as_bytes()) {
+        Ok(p) => p,
+        Err(_) => return (0, 0),
+    };
+    let mut s: StatVfs = Default::default();
+    let r = unsafe { statvfs(c_path.as_ptr(), &mut s) };
+    if r != 0 {
+        return (0, 0);
+    }
+    let total = (s.f_blocks as i64) * (s.f_frsize as i64);
+    let free = (s.f_bavail as i64) * (s.f_frsize as i64);
+    (total, free)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn disk_space(_path: &std::path::Path) -> (i64, i64) {
+    (0, 0)
+}
+
+// curl로 Telegram sendMessage 호출 (의존성 추가 회피).
+async fn send_telegram(bot: &str, chat: &str, text: &str) {
+    let url = format!("https://api.telegram.org/bot{bot}/sendMessage");
+    let bot = bot.to_string();
+    let chat = chat.to_string();
+    let text = text.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = std::process::Command::new("curl")
+            .arg("-s")
+            .arg("-X").arg("POST")
+            .arg("-d").arg(format!("chat_id={chat}"))
+            .arg("--data-urlencode").arg(format!("text={text}"))
+            .arg(&url)
+            .output();
+        let _ = bot; // suppress unused warning when format consumed
+    })
+    .await;
+}
+
 // ---- Tracker JS (1KB) ----
 
 const TRACKER_JS: &str = include_str!("../../tracker/psmeter.js");
@@ -488,6 +666,48 @@ async fn main() {
         });
     }
 
+    // 디스크 사용량 알림 백그라운드 작업.
+    // PSMETER_TELEGRAM_BOT_TOKEN + PSMETER_TELEGRAM_CHAT_ID 설정시 동작.
+    // PSMETER_DISK_ALERT_PCT 임계치(기본 80) 초과 시 1회 알림 후 cool-down 6시간.
+    if let (Ok(bot), Ok(chat)) = (
+        std::env::var("PSMETER_TELEGRAM_BOT_TOKEN"),
+        std::env::var("PSMETER_TELEGRAM_CHAT_ID"),
+    ) {
+        if !bot.is_empty() && !chat.is_empty() {
+            let threshold: f64 = std::env::var("PSMETER_DISK_ALERT_PCT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(80.0);
+            let disk_state = state.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(60 * 60));
+                let mut last_alert: Option<std::time::Instant> = None;
+                loop {
+                    tick.tick().await;
+                    let (total, free) = disk_space(&disk_state.data_dir);
+                    if total == 0 { continue; }
+                    let used = total - free;
+                    let pct = (used as f64 / total as f64) * 100.0;
+                    if pct < threshold { continue; }
+                    if let Some(t) = last_alert {
+                        if t.elapsed() < Duration::from_secs(6 * 3600) { continue; }
+                    }
+                    let db_bytes = disk_state.store.db_size_bytes().await.unwrap_or(0);
+                    let msg = format!(
+                        "psmeter 디스크 경고: {:.1}% 사용 (총 {} GB, 빈 {} GB, DB {} MB)",
+                        pct,
+                        total / 1_000_000_000,
+                        free / 1_000_000_000,
+                        db_bytes / 1_000_000,
+                    );
+                    send_telegram(&bot, &chat, &msg).await;
+                    last_alert = Some(std::time::Instant::now());
+                    tracing::warn!("{msg}");
+                }
+            });
+        }
+    }
+
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/track", post(track))
@@ -497,6 +717,9 @@ async fn main() {
         .route("/api/admin/stats", get(stats))
         .route("/api/admin/live", get(live))
         .route("/api/admin/ws", get(admin_ws))
+        .route("/api/admin/events", get(list_events))
+        .route("/api/admin/events.csv", get(events_csv))
+        .route("/api/admin/disk", get(disk))
         .route("/tracker/psmeter.js", get(serve_tracker))
         .fallback(serve_dashboard)
         .layer(CorsLayer::permissive())

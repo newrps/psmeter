@@ -1,6 +1,6 @@
 <script>
   import { onMount } from "svelte";
-  import { isFirstRun, getToken, clearToken, listSites } from "$lib/api.js";
+  import { isFirstRun, getToken, clearToken, listSites, getDisk } from "$lib/api.js";
   import Setup from "$lib/Setup.svelte";
   import Login from "$lib/Login.svelte";
   import SiteList from "$lib/SiteList.svelte";
@@ -9,6 +9,11 @@
   let phase = $state("checking"); // "checking" | "setup" | "login" | "ready"
   let selected = $state("");
   let refreshKey = $state(0);
+  let disk = $state(null);
+
+  async function loadDisk() {
+    try { disk = await getDisk(); } catch (_) {}
+  }
 
   onMount(async () => {
     const first = await isFirstRun();
@@ -20,6 +25,8 @@
       try {
         await listSites();
         phase = "ready";
+        loadDisk();
+        setInterval(loadDisk, 60_000);
         return;
       } catch (_) {
         clearToken();
@@ -27,6 +34,18 @@
     }
     phase = "login";
   });
+
+  function fmtBytes(n) {
+    if (n == null) return "-";
+    if (n > 1e9) return `${(n/1e9).toFixed(1)} GB`;
+    if (n > 1e6) return `${(n/1e6).toFixed(0)} MB`;
+    if (n > 1e3) return `${(n/1e3).toFixed(0)} KB`;
+    return `${n} B`;
+  }
+  function diskPct() {
+    if (!disk || !disk.disk_total_bytes) return 0;
+    return (1 - disk.disk_free_bytes / disk.disk_total_bytes) * 100;
+  }
 
   function logout() {
     clearToken();
@@ -61,6 +80,22 @@
         <button class="btn secondary mini" on:click={logout}>로그아웃</button>
       </div>
       <SiteList bind:selected refreshKey={refreshKey} />
+
+      {#if disk}
+        <div class="disk" class:warn={diskPct() >= 80}>
+          <div class="disk-row">
+            <span class="dk">DB</span><span class="dv">{fmtBytes(disk.db_bytes)}</span>
+          </div>
+          <div class="disk-row">
+            <span class="dk">디스크</span>
+            <span class="dv">{fmtBytes(disk.disk_free_bytes)} 남음</span>
+          </div>
+          <div class="bar-wrap">
+            <div class="bar" style="width: {diskPct().toFixed(0)}%"></div>
+          </div>
+          <div class="disk-pct">{diskPct().toFixed(0)}% 사용</div>
+        </div>
+      {/if}
     </aside>
 
     <main>
@@ -142,6 +177,23 @@
     font-size: 14px;
   }
   .empty .big { font-size: 36px; margin-bottom: 12px; opacity: 0.4; }
+
+  .disk {
+    margin-top: 20px;
+    padding: 10px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 11px;
+  }
+  .disk.warn { border-color: var(--danger); }
+  .disk-row { display: flex; justify-content: space-between; padding: 2px 0; }
+  .dk { color: var(--muted); }
+  .dv { color: var(--text); font-variant-numeric: tabular-nums; }
+  .bar-wrap { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin: 6px 0 3px; }
+  .bar { height: 100%; background: var(--accent); }
+  .disk.warn .bar { background: var(--danger); }
+  .disk-pct { color: var(--muted); text-align: right; font-size: 10px; }
 
   @media (max-width: 720px) {
     .layout { grid-template-columns: 1fr; }

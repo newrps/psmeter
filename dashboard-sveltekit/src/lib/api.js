@@ -56,3 +56,35 @@ export const getStats = (site, fromMs, toMs) => {
 
 export const getLive = (site) =>
   request("GET", `/admin/live?site=${encodeURIComponent(site)}`);
+
+export const listEvents = (site, fromMs, toMs, kind, limit, offset) => {
+  const p = new URLSearchParams({ site });
+  if (fromMs != null) p.set("from", fromMs);
+  if (toMs != null) p.set("to", toMs);
+  if (kind && kind !== "all") p.set("kind", kind);
+  if (limit != null) p.set("limit", limit);
+  if (offset != null) p.set("offset", offset);
+  return request("GET", `/admin/events?${p}`);
+};
+
+export async function downloadEventsCsv(site, fromMs, toMs, kind) {
+  const p = new URLSearchParams({ site });
+  if (fromMs != null) p.set("from", fromMs);
+  if (toMs != null) p.set("to", toMs);
+  if (kind && kind !== "all") p.set("kind", kind);
+  const res = await fetch(`${API}/admin/events.csv?${p}`, {
+    headers: { Authorization: `Bearer ${getToken()}` },
+  });
+  if (!res.ok) throw new Error(`CSV 다운로드 실패 (${res.status})`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `events-${site}-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+export const getDisk = () => request("GET", "/admin/disk");

@@ -41,6 +41,13 @@ pub struct Stats {
     pub source: String, // "raw" | "hourly" | "daily" — 디버깅/관측용
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DiskInfo {
+    pub db_bytes: i64,
+    pub disk_total_bytes: i64,
+    pub disk_free_bytes: i64,
+}
+
 #[async_trait]
 pub trait Store: Send + Sync {
     async fn ensure_site(&self, domain: &str, name: &str) -> rusqlite::Result<()>;
@@ -51,6 +58,23 @@ pub trait Store: Send + Sync {
     async fn active_visitors(&self, site: &str, since_ms: i64) -> rusqlite::Result<i64>;
     async fn rollup_hourly(&self) -> rusqlite::Result<usize>;
     async fn rollup_daily(&self) -> rusqlite::Result<usize>;
+    async fn list_events(
+        &self,
+        site: &str,
+        from_ms: i64,
+        to_ms: i64,
+        kind: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> rusqlite::Result<Vec<Event>>;
+    async fn count_events(
+        &self,
+        site: &str,
+        from_ms: i64,
+        to_ms: i64,
+        kind: Option<&str>,
+    ) -> rusqlite::Result<i64>;
+    async fn db_size_bytes(&self) -> rusqlite::Result<i64>;
 }
 
 pub struct SqliteStore {
@@ -467,6 +491,83 @@ impl Store for SqliteStore {
         tx.commit()?;
 
         Ok(visitors_inserted)
+    }
+
+    // 원본 events 조회 (최신순)
+    async fn list_events(
+        &self,
+        site: &str,
+        from_ms: i64,
+        to_ms: i64,
+        kind: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> rusqlite::Result<Vec<Event>> {
+        let conn = self.conn()?;
+        let map_row = |r: &rusqlite::Row| -> rusqlite::Result<Event> {
+            Ok(Event {
+                site: r.get(0)?,
+                kind: r.get(1)?,
+                path: r.get(2)?,
+                referrer: r.get(3)?,
+                visitor_hash: r.get(4)?,
+                country: r.get(5)?,
+                device: r.get(6)?,
+                browser: r.get(7)?,
+                ts_ms: r.get(8)?,
+            })
+        };
+        if let Some(k) = kind {
+            let mut stmt = conn.prepare(
+                "SELECT site, kind, path, referrer, visitor_hash, country, device, browser, ts_ms
+                 FROM events
+                 WHERE site = ?1 AND ts_ms BETWEEN ?2 AND ?3 AND kind = ?4
+                 ORDER BY ts_ms DESC LIMIT ?5 OFFSET ?6",
+            )?;
+            stmt.query_map(params![site, from_ms, to_ms, k, limit, offset], map_row)?
+                .collect()
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT site, kind, path, referrer, visitor_hash, country, device, browser, ts_ms
+                 FROM events
+                 WHERE site = ?1 AND ts_ms BETWEEN ?2 AND ?3
+                 ORDER BY ts_ms DESC LIMIT ?4 OFFSET ?5",
+            )?;
+            stmt.query_map(params![site, from_ms, to_ms, limit, offset], map_row)?
+                .collect()
+        }
+    }
+
+    async fn count_events(
+        &self,
+        site: &str,
+        from_ms: i64,
+        to_ms: i64,
+        kind: Option<&str>,
+    ) -> rusqlite::Result<i64> {
+        let conn = self.conn()?;
+        if let Some(k) = kind {
+            conn.query_row(
+                "SELECT COUNT(*) FROM events
+                 WHERE site = ?1 AND ts_ms BETWEEN ?2 AND ?3 AND kind = ?4",
+                params![site, from_ms, to_ms, k],
+                |r| r.get(0),
+            )
+        } else {
+            conn.query_row(
+                "SELECT COUNT(*) FROM events
+                 WHERE site = ?1 AND ts_ms BETWEEN ?2 AND ?3",
+                params![site, from_ms, to_ms],
+                |r| r.get(0),
+            )
+        }
+    }
+
+    async fn db_size_bytes(&self) -> rusqlite::Result<i64> {
+        let conn = self.conn()?;
+        let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        Ok(page_count * page_size)
     }
 
     async fn rollup_daily(&self) -> rusqlite::Result<usize> {

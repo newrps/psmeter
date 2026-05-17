@@ -1,11 +1,13 @@
 <script>
   import { getStats, getLive, deleteSite } from "./api.js";
+  import EventsView from "./EventsView.svelte";
 
   let { domain, onDeleted } = $props();
 
   let stats = $state(null);
   let live = $state(0);
   let range = $state("24h"); // 24h | 7d | 30d
+  let view = $state("stats"); // stats | events
   let error = $state("");
 
   function rangeMs() {
@@ -13,11 +15,15 @@
     return map[range] || map["24h"];
   }
 
+  let nowMs = $state(Date.now());
+  let fromMs = $derived(nowMs - rangeMs());
+  let toMs = $derived(nowMs);
+
   async function load() {
     error = "";
     try {
-      const now = Date.now();
-      stats = await getStats(domain, now - rangeMs(), now);
+      nowMs = Date.now();
+      stats = await getStats(domain, nowMs - rangeMs(), nowMs);
     } catch (e) {
       error = e.message;
     }
@@ -71,7 +77,14 @@
   </div>
 </div>
 
-{#if error}
+<div class="tabs">
+  <button class="tab" class:on={view === "stats"} onclick={() => (view = "stats")}>통계</button>
+  <button class="tab" class:on={view === "events"} onclick={() => (view = "events")}>원본 이벤트</button>
+</div>
+
+{#if view === "events"}
+  <EventsView {domain} {fromMs} {toMs} />
+{:else if error}
   <div class="err">{error}</div>
 {:else if stats}
   <div class="kpis">
@@ -204,6 +217,23 @@
     white-space: pre-wrap;
     margin: 0;
   }
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tab {
+    background: transparent;
+    border: 0;
+    color: var(--muted);
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .tab.on { color: var(--accent); border-bottom-color: var(--accent); }
   .actions { margin-top: 20px; }
   .err { color: var(--danger); padding: 12px; border: 1px solid var(--danger); border-radius: 6px; }
   .hint { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
