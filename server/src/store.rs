@@ -524,8 +524,10 @@ impl Store for SqliteStore {
                  WHERE site = ?1 AND ts_ms BETWEEN ?2 AND ?3 AND kind = ?4
                  ORDER BY ts_ms DESC LIMIT ?5 OFFSET ?6",
             )?;
-            stmt.query_map(params![site, from_ms, to_ms, k, limit, offset], map_row)?
-                .collect()
+            let rows: rusqlite::Result<Vec<_>> = stmt
+                .query_map(params![site, from_ms, to_ms, k, limit, offset], map_row)?
+                .collect();
+            rows
         } else {
             let mut stmt = conn.prepare(
                 "SELECT site, kind, path, referrer, visitor_hash, country, device, browser, ts_ms
@@ -533,8 +535,10 @@ impl Store for SqliteStore {
                  WHERE site = ?1 AND ts_ms BETWEEN ?2 AND ?3
                  ORDER BY ts_ms DESC LIMIT ?4 OFFSET ?5",
             )?;
-            stmt.query_map(params![site, from_ms, to_ms, limit, offset], map_row)?
-                .collect()
+            let rows: rusqlite::Result<Vec<_>> = stmt
+                .query_map(params![site, from_ms, to_ms, limit, offset], map_row)?
+                .collect();
+            rows
         }
     }
 
