@@ -72,7 +72,7 @@
   </div>
   <div class="range">
     {#each ["24h","7d","30d"] as r}
-      <button class="rb" class:on={range === r} on:click={() => (range = r)}>{r}</button>
+      <button class="rb" class:on={range === r} onclick={() => (range = r)}>{r}</button>
     {/each}
   </div>
 </div>
@@ -151,7 +151,7 @@
   </div>
 
   <div class="actions">
-    <button class="btn danger" on:click={del}>사이트 삭제</button>
+    <button class="btn danger" onclick={del}>사이트 삭제</button>
   </div>
 {/if}
 
