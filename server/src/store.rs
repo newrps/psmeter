@@ -42,6 +42,13 @@ pub struct Stats {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct TimeseriesPoint {
+    pub ts_ms: i64,
+    pub pageviews: i64,
+    pub visitors: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DiskInfo {
     pub db_bytes: i64,
     pub disk_total_bytes: i64,
@@ -55,6 +62,13 @@ pub trait Store: Send + Sync {
     async fn delete_site(&self, domain: &str) -> rusqlite::Result<()>;
     async fn record_event(&self, ev: &Event) -> rusqlite::Result<()>;
     async fn stats(&self, site: &str, from_ms: i64, to_ms: i64) -> rusqlite::Result<Stats>;
+    async fn timeseries(
+        &self,
+        site: &str,
+        from_ms: i64,
+        to_ms: i64,
+        bucket_ms: i64,
+    ) -> rusqlite::Result<Vec<TimeseriesPoint>>;
     async fn active_visitors(&self, site: &str, since_ms: i64) -> rusqlite::Result<i64>;
     async fn rollup_hourly(&self) -> rusqlite::Result<usize>;
     async fn rollup_daily(&self) -> rusqlite::Result<usize>;
@@ -425,6 +439,120 @@ impl Store for SqliteStore {
             |r| r.get(0),
         )?;
         Ok(n)
+    }
+
+    // 시간/일 버킷별 (pageviews, unique visitors) 시계열.
+    // bucket_ms == HOUR_MS/DAY_MS 인 경우 사전집계 + raw 보충을 시도하고, 그 외에는 raw만 사용.
+    // 빈 버킷도 0으로 채워서 반환 (차트 끊김 방지).
+    async fn timeseries(
+        &self,
+        site: &str,
+        from_ms: i64,
+        to_ms: i64,
+        bucket_ms: i64,
+    ) -> rusqlite::Result<Vec<TimeseriesPoint>> {
+        use std::collections::BTreeMap;
+        let conn = self.conn()?;
+
+        let mut pv: BTreeMap<i64, i64> = BTreeMap::new();
+        let mut vs: BTreeMap<i64, i64> = BTreeMap::new();
+
+        // 사전집계 활용 가능한 경우: hour, day
+        let agg_tables = if bucket_ms == HOUR_MS {
+            Some(("events_hourly", "visitors_hourly", "ts_hour", "hourly"))
+        } else if bucket_ms == DAY_MS {
+            Some(("events_daily", "visitors_daily", "ts_day", "daily")
+)
+        } else {
+            None
+        };
+
+        let (raw_from, raw_to) = if let Some((ev_t, vs_t, ts_col, rollup_name)) = agg_tables {
+            let cutoff = self.last_rollup_ts(&conn, rollup_name);
+            let agg_to = cutoff.min(to_ms);
+            let agg_to_inc = agg_to - 1;
+
+            if from_ms <= agg_to_inc {
+                // pageviews from rollup
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {ts_col}, SUM(pageviews) FROM {ev_t}
+                     WHERE site = ?1 AND {ts_col} BETWEEN ?2 AND ?3
+                     GROUP BY {ts_col}"
+                ))?;
+                let rows = stmt.query_map(params![site, from_ms, agg_to_inc], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+                })?;
+                for row in rows {
+                    let (b, c) = row?;
+                    *pv.entry(b).or_insert(0) += c;
+                }
+
+                // visitors from rollup (DISTINCT visitor per bucket)
+                let mut vstmt = conn.prepare(&format!(
+                    "SELECT {ts_col}, COUNT(DISTINCT visitor_hash) FROM {vs_t}
+                     WHERE site = ?1 AND {ts_col} BETWEEN ?2 AND ?3
+                     GROUP BY {ts_col}"
+                ))?;
+                let vrows = vstmt.query_map(params![site, from_ms, agg_to_inc], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+                })?;
+                for row in vrows {
+                    let (b, c) = row?;
+                    *vs.entry(b).or_insert(0) += c;
+                }
+            }
+            (cutoff.max(from_ms), to_ms)
+        } else {
+            (from_ms, to_ms)
+        };
+
+        // raw 보충 (또는 raw-only 경로)
+        if raw_from <= raw_to {
+            let mut pvstmt = conn.prepare(
+                "SELECT (ts_ms / ?1) * ?1 AS bucket, COUNT(*)
+                 FROM events
+                 WHERE site = ?2 AND kind = 'pageview' AND ts_ms BETWEEN ?3 AND ?4
+                 GROUP BY bucket",
+            )?;
+            let pvrows = pvstmt.query_map(params![bucket_ms, site, raw_from, raw_to], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })?;
+            for row in pvrows {
+                let (b, c) = row?;
+                *pv.entry(b).or_insert(0) += c;
+            }
+
+            let mut vstmt = conn.prepare(
+                "SELECT bucket, COUNT(DISTINCT visitor_hash) FROM (
+                    SELECT (ts_ms / ?1) * ?1 AS bucket, visitor_hash
+                    FROM events
+                    WHERE site = ?2 AND ts_ms BETWEEN ?3 AND ?4
+                 )
+                 GROUP BY bucket",
+            )?;
+            let vrows = vstmt.query_map(params![bucket_ms, site, raw_from, raw_to], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })?;
+            for row in vrows {
+                let (b, c) = row?;
+                *vs.entry(b).or_insert(0) += c;
+            }
+        }
+
+        // 빈 버킷도 0으로 채워서 연속된 시계열 반환
+        let from_bucket = floor_to_bucket(from_ms, bucket_ms);
+        let to_bucket = floor_to_bucket(to_ms, bucket_ms);
+        let mut points = Vec::new();
+        let mut t = from_bucket;
+        while t <= to_bucket {
+            points.push(TimeseriesPoint {
+                ts_ms: t,
+                pageviews: *pv.get(&t).unwrap_or(&0),
+                visitors: *vs.get(&t).unwrap_or(&0),
+            });
+            t += bucket_ms;
+        }
+        Ok(points)
     }
 
     // 마지막 hourly_rollup ts_ms 이후 ~ 직전 시간 시작 전까지의 raw events를

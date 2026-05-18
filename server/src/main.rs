@@ -288,6 +288,49 @@ async fn stats(
     Ok(Json(state.store.stats(&q.site, from, to).await?))
 }
 
+// ---- Admin: timeseries ----
+
+#[derive(Debug, Deserialize)]
+struct TimeseriesQuery {
+    site: String,
+    #[serde(default)]
+    from: Option<i64>,
+    #[serde(default)]
+    to: Option<i64>,
+    #[serde(default)]
+    bucket: Option<String>, // "hour" | "day"
+}
+
+#[derive(Debug, Serialize)]
+struct TimeseriesResp {
+    bucket: String,
+    points: Vec<store::TimeseriesPoint>,
+}
+
+async fn timeseries(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<TimeseriesQuery>,
+) -> Result<Json<TimeseriesResp>, ApiError> {
+    require_admin(&state, &headers).await?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let from = q.from.unwrap_or(now - 24 * 3600 * 1000);
+    let to = q.to.unwrap_or(now);
+    let bucket_str = q
+        .bucket
+        .clone()
+        .unwrap_or_else(|| if (to - from) > 24 * 3600 * 1000 { "day".into() } else { "hour".into() });
+    let bucket_ms: i64 = match bucket_str.as_str() {
+        "day" => 86_400_000,
+        _ => 3_600_000,
+    };
+    let points = state.store.timeseries(&q.site, from, to, bucket_ms).await?;
+    Ok(Json(TimeseriesResp {
+        bucket: bucket_str,
+        points,
+    }))
+}
+
 #[derive(Debug, Deserialize)]
 struct LiveQuery {
     site: String,
@@ -715,6 +758,7 @@ async fn main() {
         .route("/api/admin/sites", get(list_sites).post(create_site))
         .route("/api/admin/sites/:domain", delete(delete_site))
         .route("/api/admin/stats", get(stats))
+        .route("/api/admin/timeseries", get(timeseries))
         .route("/api/admin/live", get(live))
         .route("/api/admin/ws", get(admin_ws))
         .route("/api/admin/events", get(list_events))

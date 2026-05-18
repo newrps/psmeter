@@ -1,10 +1,12 @@
 <script>
-  import { getStats, getLive, deleteSite } from "./api.js";
+  import { getStats, getLive, getTimeseries, deleteSite } from "./api.js";
   import EventsView from "./EventsView.svelte";
+  import TimeseriesChart from "./TimeseriesChart.svelte";
 
   let { domain, onDeleted } = $props();
 
   let stats = $state(null);
+  let series = $state(null); // { bucket, points }
   let live = $state(0);
   let range = $state("24h"); // 24h | 7d | 30d
   let view = $state("stats"); // stats | events
@@ -23,7 +25,12 @@
     error = "";
     try {
       nowMs = Date.now();
-      stats = await getStats(domain, nowMs - rangeMs(), nowMs);
+      const from = nowMs - rangeMs();
+      const bucket = range === "24h" ? "hour" : "day";
+      [stats, series] = await Promise.all([
+        getStats(domain, from, nowMs),
+        getTimeseries(domain, from, nowMs, bucket),
+      ]);
     } catch (e) {
       error = e.message;
     }
@@ -97,6 +104,10 @@
       <div class="lbl">방문자 (Unique)</div>
     </div>
   </div>
+
+  {#if series}
+    <TimeseriesChart points={series.points} bucket={series.bucket} />
+  {/if}
 
   <div class="grid">
     <div class="panel">

@@ -57,6 +57,14 @@ export const getStats = (site, fromMs, toMs) => {
 export const getLive = (site) =>
   request("GET", `/admin/live?site=${encodeURIComponent(site)}`);
 
+export const getTimeseries = (site, fromMs, toMs, bucket) => {
+  const p = new URLSearchParams({ site });
+  if (fromMs != null) p.set("from", fromMs);
+  if (toMs != null) p.set("to", toMs);
+  if (bucket) p.set("bucket", bucket);
+  return request("GET", `/admin/timeseries?${p}`);
+};
+
 export const listEvents = (site, fromMs, toMs, kind, limit, offset) => {
   const p = new URLSearchParams({ site });
   if (fromMs != null) p.set("from", fromMs);
