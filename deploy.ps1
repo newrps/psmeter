@@ -25,11 +25,20 @@ $HealthUrl  = if ($env:PSMETER_HEALTH_URL) { $env:PSMETER_HEALTH_URL } else { "h
 
 function Step($msg) { Write-Host ""; Write-Host "==> $msg" -ForegroundColor Cyan }
 function Skip($msg) { Write-Host "    [skip] $msg" -ForegroundColor DarkGray }
+# PS 5.1은 native exe의 stderr를 ErrorRecord로 wrap해서 ErrorActionPreference=Stop이
+# warning 한 줄에도 throw를 일으킴. Run 안에서만 잠깐 Continue로 내리고 LASTEXITCODE로 판단.
 function Run($cmd) {
   if ($DryRun) { Write-Host "    [dry] $cmd" -ForegroundColor Yellow; return }
   Write-Host "    $cmd" -ForegroundColor DarkGray
-  Invoke-Expression $cmd
-  if ($LASTEXITCODE -ne 0) { throw "command failed: $cmd" }
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    Invoke-Expression $cmd
+    $code = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+  if ($code -ne 0) { throw "command failed (exit $code): $cmd" }
 }
 
 # ---- 1. Git ----
@@ -49,10 +58,16 @@ if ($NoGit) {
       Write-Host "    [dry] git commit -m `"$msg`""
       Write-Host "    [dry] git push"
     } else {
-      git commit -m $msg
-      if ($LASTEXITCODE -ne 0) { throw "git commit failed" }
-      git push
-      if ($LASTEXITCODE -ne 0) { throw "git push failed" }
+      $prev = $ErrorActionPreference
+      $ErrorActionPreference = 'Continue'
+      try {
+        git commit -m $msg
+        if ($LASTEXITCODE -ne 0) { throw "git commit failed" }
+        git push
+        if ($LASTEXITCODE -ne 0) { throw "git push failed" }
+      } finally {
+        $ErrorActionPreference = $prev
+      }
     }
   }
 }

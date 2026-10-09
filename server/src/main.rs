@@ -141,6 +141,18 @@ fn default_kind() -> String {
     "pageview".to_string()
 }
 
+// 호스트네임 치고 넉넉한 상한(DNS 라벨 전체 길이 상한 253) + 허용 문자만. 이게 없으면
+// /api/track은 인증 없는 공개 엔드포인트라, site 필드에 아무 문자열이나(초대형 문자열 포함)
+// 넣어 보내는 요청 하나로 sites 테이블에 쓰레기 행이 그대로 생성되고(ensure_site가 길이/형식
+// 검증 없이 INSERT OR IGNORE), 그 거대한 domain 값을 쿼리 파라미터로 쓰는 관리자 대시보드가
+// 414(URI too long)를 계속 받는 2차 피해로 이어진다. 2026-09-27에 실제로 이 패턴으로
+// "AAAA...(10만자)"가 들어온 걸 로그에서 확인함.
+fn is_valid_site(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 253
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == ':')
+}
+
 async fn track(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -151,6 +163,12 @@ async fn track(
     // Content-Type 가리지 말고 본문만 JSON 파싱한다.
     let body: TrackBody = serde_json::from_slice(&raw)
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("invalid body: {e}")))?;
+    if !is_valid_site(&body.site) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid site".to_string()));
+    }
+    if body.path.len() > 2048 || body.referrer.as_deref().map(|r| r.len()).unwrap_or(0) > 2048 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "path/referrer too long".to_string()));
+    }
     // 사이트 자동 생성 (없으면) — self-hosted 편의성
     state
         .store
@@ -250,6 +268,9 @@ async fn create_site(
     Json(body): Json<CreateSite>,
 ) -> Result<StatusCode, ApiError> {
     require_admin(&state, &headers).await?;
+    if !is_valid_site(&body.domain) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid domain".to_string()));
+    }
     let name = body.name.unwrap_or_else(|| body.domain.clone());
     state.store.ensure_site(&body.domain, &name).await?;
     Ok(StatusCode::CREATED)
